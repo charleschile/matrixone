@@ -1661,6 +1661,9 @@ func buildSecondaryIndexDef(createTable *plan.CreateTable, indexInfos []*tree.In
 			indexDef, tableDef, err = buildIvfFlatSecondaryIndexDef(ctx, indexInfo, colMap, pkeyName)
 		case tree.INDEX_TYPE_MASTER:
 			indexDef, tableDef, err = buildMasterSecondaryIndexDef(ctx, indexInfo, colMap, pkeyName)
+		case tree.INDEX_TYPE_LLM:
+			indexDef, tableDef, err = buildLLMSecondaryIndexDef(ctx, indexInfo, colMap, pkeyName)
+
 		default:
 			return moerr.NewInvalidInputNoCtx("unsupported index type: %s", indexInfo.KeyType.ToString())
 		}
@@ -1921,6 +1924,9 @@ func buildRegularSecondaryIndexDef(ctx CompilerContext, indexInfo *tree.Index, c
 		indexDef.IndexAlgoParams = ""
 	}
 	return []*plan.IndexDef{indexDef}, []*TableDef{tableDef}, nil
+}
+func buildLLMSecondaryIndexDef(ctx CompilerContext, indexInfo *tree.Index, colMap map[string]*ColDef, pkeyName string) ([]*plan.IndexDef, []*TableDef, error) {
+
 }
 
 func buildIvfFlatSecondaryIndexDef(ctx CompilerContext, indexInfo *tree.Index, colMap map[string]*ColDef, pkeyName string) ([]*plan.IndexDef, []*TableDef, error) {
