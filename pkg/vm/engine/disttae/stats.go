@@ -152,6 +152,8 @@ type GlobalStats struct {
 
 	// KeyRouter is the router to decides which node should send to.
 	KeyRouter client.KeyRouter[pb.StatsInfoKey]
+
+	concurrentExecutor ConcurrentExecutor
 }
 
 func NewGlobalStats(
@@ -172,6 +174,8 @@ func NewGlobalStats(
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.concurrentExecutor = newConcurrentExecutor(runtime.GOMAXPROCS(0) * s.updateWorkerFactor * 4)
+	s.concurrentExecutor.Run(ctx)
 	go s.consumeWorker(ctx)
 	go s.updateWorker(ctx)
 	return s
@@ -476,7 +480,7 @@ func (gs *GlobalStats) updateTableStats(key pb.StatsInfoKey) {
 		return
 	}
 
-	partitionState := gs.engine.getOrCreateLatestPart(key.DatabaseID, key.TableID).Snapshot()
+	partitionState := gs.engine.GetOrCreateLatestPart(key.DatabaseID, key.TableID).Snapshot()
 	var partitionsTableDef []*plan2.TableDef
 	var approxObjectNum int64
 	if table.Partitioned > 0 {
@@ -488,7 +492,7 @@ func (gs *GlobalStats) updateTableStats(key pb.StatsInfoKey) {
 		for _, partitionTableName := range partitionInfo.PartitionTableNames {
 			partitionTable := gs.engine.getLatestCatalogCache().GetTableByName(key.DatabaseID, partitionTableName)
 			partitionsTableDef = append(partitionsTableDef, partitionTable.TableDef)
-			ps := gs.engine.getOrCreateLatestPart(key.DatabaseID, partitionTable.Id).Snapshot()
+			ps := gs.engine.GetOrCreateLatestPart(key.DatabaseID, partitionTable.Id).Snapshot()
 			approxObjectNum += int64(ps.ApproxObjectsNum())
 		}
 	} else {
@@ -511,7 +515,7 @@ func (gs *GlobalStats) updateTableStats(key pb.StatsInfoKey) {
 		approxObjectNum,
 		stats,
 	)
-	if err := UpdateStats(gs.ctx, req); err != nil {
+	if err := UpdateStats(gs.ctx, req, gs.concurrentExecutor); err != nil {
 		logutil.Errorf("failed to init stats info for table %v, err: %v", key, err)
 		return
 	}
@@ -610,29 +614,30 @@ func getMinMaxValueByFloat64(typ types.Type, buf []byte) float64 {
 }
 
 // get ndv, minval , maxval, datatype from zonemap. Retrieve all columns except for rowid, return accurate number of objects
-func updateInfoFromZoneMap(ctx context.Context, req *updateStatsRequest, info *plan2.InfoFromZoneMap) error {
+func updateInfoFromZoneMap(
+	ctx context.Context, req *updateStatsRequest, info *plan2.InfoFromZoneMap, executor ConcurrentExecutor,
+) error {
 	start := time.Now()
 	defer func() {
 		v2.TxnStatementUpdateInfoFromZonemapHistogram.Observe(time.Since(start).Seconds())
 	}()
 	lenCols := len(req.tableDef.Cols) - 1 /* row-id */
-	var (
-		init    bool
-		err     error
-		meta    objectio.ObjectDataMeta
-		objMeta objectio.ObjectMeta
-	)
-	fs, err := fileservice.Get[fileservice.FileService](req.fs, defines.SharedFileServiceName)
-	if err != nil {
-		return err
+	fs, fsErr := fileservice.Get[fileservice.FileService](req.fs, defines.SharedFileServiceName)
+	if fsErr != nil {
+		return fsErr
 	}
 
+	var updateMu sync.Mutex
+	var init bool
 	onObjFn := func(obj logtailreplay.ObjectEntry) error {
 		location := obj.Location()
-		if objMeta, err = objectio.FastLoadObjectMeta(ctx, &location, false, fs); err != nil {
+		objMeta, err := objectio.FastLoadObjectMeta(ctx, &location, false, fs)
+		if err != nil {
 			return err
 		}
-		meta = objMeta.MustDataMeta()
+		updateMu.Lock()
+		defer updateMu.Unlock()
+		meta := objMeta.MustDataMeta()
 		info.AccurateObjectNumber++
 		info.BlockNumber += int64(obj.BlkCnt())
 		info.TableCnt += float64(meta.BlockHeader().Rows())
@@ -689,7 +694,12 @@ func updateInfoFromZoneMap(ctx context.Context, req *updateStatsRequest, info *p
 		}
 		return nil
 	}
-	if err = ForeachVisibleDataObject(req.partitionState, req.ts, onObjFn); err != nil {
+	if err := ForeachVisibleDataObject(
+		req.partitionState,
+		req.ts,
+		onObjFn,
+		executor,
+	); err != nil {
 		return err
 	}
 
@@ -721,7 +731,9 @@ func adjustNDV(info *plan2.InfoFromZoneMap, tableDef *plan2.TableDef) {
 }
 
 // UpdateStats is the main function to calculate and update the stats for scan node.
-func UpdateStats(ctx context.Context, req *updateStatsRequest) error {
+func UpdateStats(
+	ctx context.Context, req *updateStatsRequest, executor ConcurrentExecutor,
+) error {
 	start := time.Now()
 	defer func() {
 		v2.TxnStatementUpdateStatsDurationHistogram.Observe(time.Since(start).Seconds())
@@ -737,11 +749,11 @@ func UpdateStats(ctx context.Context, req *updateStatsRequest) error {
 	if len(req.partitionsTableDef) > 0 {
 		for _, def := range req.partitionsTableDef {
 			req.tableDef = def
-			if err := updateInfoFromZoneMap(ctx, req, info); err != nil {
+			if err := updateInfoFromZoneMap(ctx, req, info, executor); err != nil {
 				return err
 			}
 		}
-	} else if err := updateInfoFromZoneMap(ctx, req, info); err != nil {
+	} else if err := updateInfoFromZoneMap(ctx, req, info, executor); err != nil {
 		return err
 	}
 	adjustNDV(info, baseTableDef)

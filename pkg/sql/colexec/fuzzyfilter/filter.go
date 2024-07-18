@@ -76,6 +76,10 @@ func (fuzzyFilter *FuzzyFilter) String(buf *bytes.Buffer) {
 	buf.WriteString(": fuzzy check duplicate constraint")
 }
 
+func (fuzzyFilter *FuzzyFilter) OpType() vm.OpType {
+	return vm.FuzzyFilter
+}
+
 func (fuzzyFilter *FuzzyFilter) Prepare(proc *process.Process) (err error) {
 	ctr := new(container)
 	fuzzyFilter.ctr = ctr
@@ -140,6 +144,10 @@ else
 		-> can be optimized to Test if the sinkScan data can guarantee uniqueness
 */
 func (fuzzyFilter *FuzzyFilter) Call(proc *process.Process) (vm.CallResult, error) {
+	if err, isCancel := vm.CancelCheck(proc); isCancel {
+		return vm.CancelResult, err
+	}
+
 	anal := proc.GetAnalyze(fuzzyFilter.GetIdx(), fuzzyFilter.GetParallelIdx(), fuzzyFilter.GetParallelMajor())
 	anal.Start()
 	defer anal.Stop()

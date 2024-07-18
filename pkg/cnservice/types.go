@@ -24,6 +24,7 @@ import (
 
 	"github.com/matrixorigin/matrixone/pkg/bootstrap"
 	"github.com/matrixorigin/matrixone/pkg/clusterservice"
+	"github.com/matrixorigin/matrixone/pkg/cnservice/cnclient"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/morpc"
 	moruntime "github.com/matrixorigin/matrixone/pkg/common/runtime"
@@ -421,7 +422,7 @@ func (c *Config) Validate() error {
 	}
 
 	if c.LogtailUpdateWorkerFactor == 0 {
-		c.LogtailUpdateWorkerFactor = 8
+		c.LogtailUpdateWorkerFactor = 4
 	}
 
 	if !metadata.ValidStateString(c.InitWorkState) {
@@ -660,6 +661,7 @@ type service struct {
 		// counter recording the total number of running pipelines,
 		// details are not recorded for simplicity as suggested by @nnsgmsone
 		counter atomic.Int64
+		client  cnclient.PipelineClient
 	}
 }
 
